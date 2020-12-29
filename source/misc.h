@@ -6,6 +6,7 @@
 #include <functional>
 #include <fstream>
 #include <mutex>
+#include <atomic>
 
 #include "types.h"
 
@@ -191,6 +192,25 @@ static std::ostream& operator<<(std::ostream& os, PRNG& prng)
 }
 
 // --------------------
+//  64bit×64bitの掛け算の上位64bitを取り出す関数
+// --------------------
+
+inline uint64_t mul_hi64(uint64_t a, uint64_t b) {
+#if defined(__GNUC__) && defined(IS_64BIT)
+	__extension__ typedef unsigned __int128 uint128;
+	return ((uint128)a * (uint128)b) >> 64;
+#else
+	// 64bit同士の掛け算を64bitを32bit 2つに分割して、筆算のようなことをするコード
+	uint64_t aL = (uint32_t)a, aH = a >> 32;
+	uint64_t bL = (uint32_t)b, bH = b >> 32;
+	uint64_t c1 = (aL * bL) >> 32;
+	uint64_t c2 = aH * bL + c1;
+	uint64_t c3 = aL * bH + (uint32_t)c2;
+	return aH * bH + (c2 >> 32) + (c3 >> 32);
+#endif
+}
+
+// --------------------
 //  全プロセッサを使う
 // --------------------
 
@@ -245,7 +265,7 @@ struct Timer
 #if defined(USE_TIME_MANAGEMENT)
 
   // 今回の思考時間を計算して、optimum(),maximum()が値をきちんと返せるようにする。
-	void init(Search::LimitsType& limits, Color us, int ply);
+	void init(const Search::LimitsType& limits, Color us, int ply);
 
 	TimePoint minimum() const { return minimumTime; }
 	TimePoint optimum() const { return optimumTime; }
@@ -256,7 +276,7 @@ struct Timer
 	TimePoint round_up(TimePoint t) const;
 
 	// 探索終了の時間(startTime + search_end >= now()になったら停止)
-	TimePoint search_end;
+	std::atomic<TimePoint> search_end;
 
 private:
 	TimePoint minimumTime;
@@ -577,6 +597,7 @@ struct LineScanner
 	// 空の文字列である場合は引数の値がそのまま返る。
 	// "ABC"のような文字列で数値化できない場合は0が返る。(あまり良くない仕様だがatoll()を使うので仕方ない)
 	s64 get_number(s64 defaultValue);
+	double get_double(double defaultValue);
 
 	// 解析位置(カーソル)が行の末尾まで進んだのか？
 	// eolとはEnd Of Lineの意味。
@@ -707,22 +728,23 @@ namespace Directory
 	extern std::vector<std::string> EnumerateFiles(const std::string& sourceDirectory, const std::string& extension);
 
 	// フォルダを作成する。
-	// カレントフォルダ相対で指定する。dir_nameに日本語は使っていないものとする。
+	// working directory相対で指定する。dir_nameに日本語は使っていないものとする。
 	// ※　Windows環境だと、この関数名、WinAPIのCreateDirectoryというマクロがあって…。
 	// 　ゆえに、CreateDirectory()をやめて、CreateFolder()に変更する。
 	extern Tools::Result CreateFolder(const std::string& dir_name);
 
-	// カレントフォルダを返す(起動時のフォルダ)
-	// main関数に渡された引数から設定してある。
+	// working directoryを返す。
 	// "GetCurrentDirectory"という名前はWindowsAPI(で定義されているマクロ)と競合する。
 	extern std::string GetCurrentFolder();
-
 }
 
-namespace Misc
-{
-	// このmisc.hの各種クラスの初期化。起動時にmain()から一度呼び出すようにする。
-	extern void init(char* argv[]);
+namespace CommandLine {
+	// 起動時にmain.cppから呼び出される。
+	// CommandLine::binaryDirectory , CommandLine::workingDirectoryを設定する。
+	extern void init(int argc, char* argv[]);
+
+	extern std::string binaryDirectory;  // path of the executable directory
+	extern std::string workingDirectory; // path of the working directory
 }
 
 

@@ -12,6 +12,11 @@
 #include "search.h"
 #include "thread_win32_osx.h"
 
+#if defined(EVAL_LEARN)
+// 学習用の実行ファイルでは、スレッドごとに置換表を持ちたい。
+#include "tt.h"
+#endif
+
 // --------------------
 // 探索時に用いるスレッド
 // --------------------
@@ -73,7 +78,11 @@ public:
 	// pvIdx    : このスレッドでMultiPVを用いているとして、rootMovesの(0から数えて)何番目のPVの指し手を
 	//      探索中であるか。MultiPVでないときはこの変数の値は0。
 	// pvLast   : tbRank絡み。将棋では関係ないので用いない。
-	size_t pvIdx /*,pvLast*/ /* ,shuffleExts */;
+	size_t pvIdx /*,pvLast*/;
+
+	// 置換表に平均的にどれくらいhitしているかという統計情報
+	// これに基づき、枝刈りを調整する。
+	uint64_t ttHitAverage;
 
 	// selDepth  : rootから最大、何手目まで探索したか(選択深さの最大)
 	// nmpMinPly : null moveの前回の適用ply
@@ -89,6 +98,10 @@ public:
 	// 探索開始局面
 	Position rootPos;
 
+	// rootでのStateInfo
+	// Position::set()で書き換えるのでスレッドごとに保持していないといけない。
+	StateInfo rootState;
+
 	// 探索開始局面で思考対象とする指し手の集合。
 	// goコマンドで渡されていなければ、全合法手(ただし歩の不成などは除く)とする。
 	Search::RootMoves rootMoves;
@@ -100,17 +113,25 @@ public:
 	//
 	Depth rootDepth, completedDepth;
 
-	// 近代的なMovePickerではオーダリングのために、スレッドごとにhistoryとcounter movesのtableを持たないといけない。
+#if defined(USE_MOVE_PICKER)
+	// 近代的なMovePickerではオーダリングのために、スレッドごとにhistoryとcounter movesなどのtableを持たないといけない。
 	CounterMoveHistory counterMoves;
+	LowPlyHistory lowPlyHistory;
 	ButterflyHistory mainHistory;
 	CapturePieceToHistory captureHistory;
 
 	// コア数が多いか、長い持ち時間においては、ContinuationHistoryもスレッドごとに確保したほうが良いらしい。
 	// cf. https://github.com/official-stockfish/Stockfish/commit/5c58d1f5cb4871595c07e6c2f6931780b5ac05b5
-	ContinuationHistory continuationHistory;
+	// 添字の[2][2]は、[inCheck(王手がかかっているか)][captureOrPawnPromotion]
+	// →　この改造、レーティングがほぼ上がっていない。悪い改造のような気がする。
+	ContinuationHistory continuationHistory[2][2];
+#endif
 
 	// Stockfish10ではスレッドごとにcontemptを保持するように変わった。
 	//Score contempt;
+
+	// 反復深化のループで何度fail highしたかのカウンター
+	int failedHighCnt;
 
 	// ------------------------------
 	//   やねうら王、独自追加
@@ -120,6 +141,11 @@ public:
 	// スレッドごとにメモリ領域を割り当てたいときなどに必要となる。
 	// MainThreadなら0、slaveなら1,2,3,...
 	size_t thread_id() const { return idx; }
+
+#if defined(EVAL_LEARN)
+	// 学習用の実行ファイルでは、スレッドごとに置換表を持ちたい。
+	TranspositionTable tt;
+#endif
 
 };
   
@@ -141,7 +167,11 @@ struct MainThread: public Thread
 
 	// 前回の探索時のスコア。
 	// 次回の探索のときに何らか使えるかも。
-	Value previousScore;
+	Value bestPreviousScore;
+
+	// 時間まぎわのときに探索を終了させるかの判定に用いるための、
+	// 反復深化のiteration、前4回分のScore
+	Value iterValue[4];
 
 	// check_time()で用いるカウンター。
 	// デクリメントしていきこれが0になるごとに思考をストップするのか判定する。
@@ -193,8 +223,19 @@ struct ThreadPool: public std::vector<Thread*>
 	// 今回、goコマンド以降に探索したノード数
 	uint64_t nodes_searched() { return accumulate(&Thread::nodes); }
 
+	// 探索終了時に、一番良い探索ができていたスレッドを選ぶ。
+	Thread* get_best_thread() const;
+
+	// 探索を開始する(main thread以外)
+	void start_searching();
+
+	// main threadがそれ以外の探索threadの終了を待つ。
+	void wait_for_search_finished() const;
+
 	// stop   : 探索中にこれがtrueになったら探索を即座に終了すること。
-	std::atomic_bool stop;
+	// increaseDepth : 一定間隔ごとに反復深化の探索depthが増えて行っているかをチェックするためのフラグ
+	//                 増えて行ってないなら、同じ深さを再度探索するのに用いる。
+	std::atomic_bool stop , increaseDepth;
 	
 private:
 

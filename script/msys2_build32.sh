@@ -2,18 +2,18 @@
 # -*- coding: utf-8 -*-
 # MSYS2 (MinGW 32-bit) 上で Windows バイナリのビルド
 # ビルド用パッケージの導入
-# $ pacboy --needed --noconfirm -Sy toolchain:m clang:m
+# $ pacboy --needed --noconfirm -Syuu toolchain:m clang:m openblas:m base-devel: msys2-devel:
 # MSYS2パッケージの更新、更新出来る項目が無くなるまで繰り返し実行、場合によってはMinGWの再起動が必要
-# $ pacman -Syuu
+# $ pacman -Syuu --noconfirm
 
 # Example 1: 全パターンのビルド
 # msys2_build32.sh
 
 # Example 2: 指定パターンのビルド(-c: コンパイラ名, -e: エディション名, -t: ターゲット名)
-# msys2_build32.sh -c clang++ -e YANEURAOU_ENGINE_NNUE_HALFKP256
+# msys2_build32.sh -c clang++ -e YANEURAOU_ENGINE_NNUE
 
 # Example 3: 特定パターンのビルド(複数指定時はカンマ区切り、 -e, -t オプションのみワイルドカード使用可、ワイルドカード使用時はシングルクォートで囲む)
-# msys2_build32.sh -c clang++,g++ -e '*KPPT*,*HALFKP*'
+# msys2_build32.sh -c clang++,g++ -e '*KPPT*,*NNUE*'
 
 OS=Windows_NT
 MAKE=mingw32-make
@@ -41,30 +41,63 @@ IFS=, eval 'COMPILERSARR=($COMPILERS)'
 IFS=, eval 'EDITIONSARR=($EDITIONS)'
 IFS=, eval 'TARGETSARR=($TARGETS)'
 
-cd `dirname $0`
-cd ../source
+pushd `dirname $0`
+pushd ../source
 
 EDITIONS=(
+  YANEURAOU_ENGINE_NNUE
+  YANEURAOU_ENGINE_NNUE_HALFKPE9
+  YANEURAOU_ENGINE_NNUE_KP256
   YANEURAOU_ENGINE_KPPT
   YANEURAOU_ENGINE_KPP_KKPT
   YANEURAOU_ENGINE_MATERIAL
-  YANEURAOU_ENGINE_NNUE_HALFKP256
-  YANEURAOU_ENGINE_NNUE_KP256
+  "YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=002"
+  "YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=003"
+  "YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=004"
+  "YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=005"
+  "YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=006"
   MATE_ENGINE
+  USER_ENGINE
 )
 
 TARGETS=(
-  nosse
+  normal
+  tournament
+  evallearn
+  gensfen
 )
+
+declare -A DIRSTR;
+DIRSTR=(
+  ["YANEURAOU_ENGINE_NNUE"]="NNUE"
+  ["YANEURAOU_ENGINE_NNUE_HALFKPE9"]="NNUE_HALFKPE9"
+  ["YANEURAOU_ENGINE_NNUE_KP256"]="NNUE_KP256"
+  ["YANEURAOU_ENGINE_KPPT"]="KPPT"
+  ["YANEURAOU_ENGINE_KPP_KKPT"]="KPP_KKPT"
+  ["YANEURAOU_ENGINE_MATERIAL"]="MaterialLv1"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=002"]="MaterialLv2"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=003"]="MaterialLv3"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=004"]="MaterialLv4"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=005"]="MaterialLv5"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=006"]="MaterialLv6"
+  ["MATE_ENGINE"]="MATE"
+);
 
 declare -A FILESTR;
 FILESTR=(
-  ["YANEURAOU_ENGINE_KPPT"]="kppt"
-  ["YANEURAOU_ENGINE_KPP_KKPT"]="kpp_kkpt"
-  ["YANEURAOU_ENGINE_MATERIAL"]="material"
-  ["YANEURAOU_ENGINE_NNUE_HALFKP256"]="nnue-halfkp_256"
-  ["YANEURAOU_ENGINE_NNUE_KP256"]="nnue-k_p_256"
-  ["MATE_ENGINE"]="mate"
+  ["YANEURAOU_ENGINE_NNUE"]="YaneuraOu_NNUE"
+  ["YANEURAOU_ENGINE_NNUE_HALFKPE9"]="YaneuraOu_NNUE_KPE9"
+  ["YANEURAOU_ENGINE_NNUE_KP256"]="YaneuraOu_NNUE_KP256"
+  ["YANEURAOU_ENGINE_KPPT"]="YaneuraOu_KPPT"
+  ["YANEURAOU_ENGINE_KPP_KKPT"]="YaneuraOu_KPP_KKPT"
+  ["YANEURAOU_ENGINE_MATERIAL"]="YaneuraOu_MaterialLv1"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=002"]="YaneuraOu_MaterialLv2"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=003"]="YaneuraOu_MaterialLv3"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=004"]="YaneuraOu_MaterialLv4"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=005"]="YaneuraOu_MaterialLv5"
+  ["YANEURAOU_ENGINE_MATERIAL MATERIAL_LEVEL=006"]="YaneuraOu_MaterialLv6"
+  ["MATE_ENGINE"]="tanuki_MATE"
+  ["USER_ENGINE"]="user"
 );
 
 set -f
@@ -78,7 +111,7 @@ for COMPILER in ${COMPILERSARR[@]}; do
       if [[ $EDITION == $EDITIONPTN ]]; then
         set -f
         echo "* edition: ${EDITION}"
-        BUILDDIR=../build/windows/${FILESTR[$EDITION]}
+        BUILDDIR=../build/windows/${DIRSTR[$EDITION]}
         mkdir -p ${BUILDDIR}
         for TARGET in ${TARGETS[@]}; do
           for TARGETPTN in ${TARGETSARR[@]}; do
@@ -87,7 +120,7 @@ for COMPILER in ${COMPILERSARR[@]}; do
               echo "* target: ${TARGET}"
               TGSTR=YaneuraOu-${FILESTR[$EDITION]}-msys2-${CSTR}-${TARGET}
               ${MAKE} -f ${MAKEFILE} clean YANEURAOU_EDITION=${EDITION}
-              nice ${MAKE} -f ${MAKEFILE} -j${JOBS} ${TARGET} YANEURAOU_EDITION=${EDITION} COMPILER=${COMPILER} 2>&1 | tee ${BUILDDIR}/${TGSTR}.log
+              nice ${MAKE} -f ${MAKEFILE} -j${JOBS} ${TARGET} YANEURAOU_EDITION=${EDITION} COMPILER=${COMPILER} TARGET_CPU=NO_SSE > >(tee ${BUILDDIR}/${TGSTR}.log) || exit $?
               cp YaneuraOu-by-gcc.exe ${BUILDDIR}/${TGSTR}.exe
               ${MAKE} -f ${MAKEFILE} clean YANEURAOU_EDITION=${EDITION}
               set -f
@@ -102,3 +135,6 @@ for COMPILER in ${COMPILERSARR[@]}; do
     done
   done
 done
+
+popd
+popd

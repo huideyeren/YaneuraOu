@@ -15,12 +15,16 @@ int main(int argc, char* argv[])
 {
 	// --- 全体的な初期化
 
-	Misc::init(argv);
+	CommandLine::init(argc,argv);
 	USI::init(Options);
 	Bitboards::init();
 	Position::init();
 	Search::init();
-	Threads.set(Options["Threads"]);
+
+	// エンジンオプションの"Threads"があるとは限らないので…。
+	size_t thread_num = Options.count("Threads") ? (size_t)Options["Threads"] : 1;
+	Threads.set(thread_num);
+
 	//Search::clear();
 	Eval::init();
 

@@ -2,6 +2,7 @@
 #include "misc.h"
 #include "tt.h"
 #include "thread.h"
+#include "mate/mate.h"
 
 #include <iostream>
 #include <sstream>
@@ -122,7 +123,7 @@ void Position::init() {
 
 	// またpr==NO_PIECEのときは0であることを保証したいのでSET_HASHしない。
 	for (auto c : COLOR)
-		for (Piece pr = PIECE_ZERO; pr < PIECE_HAND_NB; ++pr)
+		for (PieceType pr = NO_PIECE_TYPE; pr < PIECE_HAND_NB; ++pr)
 			if (pr)
 				SET_HASH(Zobrist::hand[c][pr], rng.rand<Key>() & ~1ULL, rng.rand<Key>(), rng.rand<Key>(), rng.rand<Key>());
 
@@ -248,10 +249,10 @@ void Position::set(std::string sfen , StateInfo* si , Thread* th)
 	bool promote = false;
 	size_t idx;
 
+#if defined (USE_EVAL_LIST)
 	// evalListのclear。上でmemsetでゼロクリアしたときにクリアされているが…。
 	evalList.clear();
 
-#if defined (USE_FV38)
 	// PieceListを更新する上で、どの駒がどこにあるかを設定しなければならないが、
 	// それぞれの駒をどこまで使ったかのカウンター
 	PieceNumber piece_no_count[KING] = { PIECE_NUMBER_ZERO,PIECE_NUMBER_PAWN,PIECE_NUMBER_LANCE,PIECE_NUMBER_KNIGHT,
@@ -259,11 +260,6 @@ void Position::set(std::string sfen , StateInfo* si , Thread* th)
 
 	// 先手玉のいない詰将棋とか、駒落ちに対応させるために、存在しない駒はすべてBONA_PIECE_ZEROにいることにする。
 	// 上のevalList.clear()で、ゼロクリアしているので、それは達成しているはず。
-#elif defined(USE_FV_VAR)
-	auto& dp = st->dirtyPiece;
-	// FV_VARのときは直接evalListに追加せず、DirtyPieceにいったん追加して、
-	// そのあと、DirtyPiece::update()でevalListに追加する。このupdate()の時に組み換えなどの操作をしたいため。
-	dp.set_state_info(st);
 #endif
 
 	kingSquare[BLACK] = kingSquare[WHITE] = SQ_NB;
@@ -290,22 +286,12 @@ void Position::set(std::string sfen , StateInfo* si , Thread* th)
 			auto pc = Piece(idx + (promote ? u32(PIECE_PROMOTE) : 0));
 			put_piece(sq, pc);
 
-#if defined(USE_FV38)
+#if defined (USE_EVAL_LIST)
 			PieceNumber piece_no =
 				(idx == B_KING) ? PIECE_NUMBER_BKING : // 先手玉
 				(idx == W_KING) ? PIECE_NUMBER_WKING : // 後手玉
 				piece_no_count[raw_type_of(Piece(idx))]++; // それ以外
 			evalList.put_piece(piece_no, sq, pc); // sqの升にpcの駒を配置する
-#elif defined(USE_FV_VAR)
-			if (type_of(pc) != KING)
-			{
-				dp.add_piece(sq, pc);
-				dp.do_update(evalList);
-				dp.clear();
-				// DirtyPieceのBonaPieceを格納するバッファ、極めて小さいのでevalListに反映させるごとにクリアしておく。
-
-				//Eval::print_eval_list(*this);
-			}
 #endif
 
 			// 1升進める
@@ -352,15 +338,12 @@ void Position::set(std::string sfen , StateInfo* si , Thread* th)
 			// FV38などではこの個数分だけpieceListに突っ込まないといけない。
 			for (int i = 0; i < ct; ++i)
 			{
-				Piece rpc = raw_type_of(Piece(idx));
-#if defined (USE_FV38)
+				PieceType rpc = raw_type_of(Piece(idx));
+
+#if defined (USE_EVAL_LIST)
 				PieceNumber piece_no = piece_no_count[rpc]++;
 				ASSERT_LV1(is_ok(piece_no));
 				evalList.put_piece(piece_no, color_of(Piece(idx)), rpc, i);
-#elif defined(USE_FV_VAR)
-				dp.add_piece(color_of(Piece(idx)), rpc, i);
-				dp.do_update(evalList);
-				dp.clear();
 #endif
 			}
 			ct = 0;
@@ -391,7 +374,10 @@ void Position::set(std::string sfen , StateInfo* si , Thread* th)
 
 	// --- evaluate
 
+#if defined (USE_PIECE_VALUE)
 	st->materialValue = Eval::material(*this);
+#endif
+
 	Eval::compute_eval(*this);
 
 	// --- validation
@@ -407,7 +393,7 @@ void Position::set(std::string sfen , StateInfo* si , Thread* th)
 
 // 局面のsfen文字列を取得する。
 // Position::set()の逆変換。
-const std::string Position::sfen() const
+const std::string Position::sfen(int gamePly_) const
 {
 	std::ostringstream ss;
 
@@ -450,7 +436,7 @@ const std::string Position::sfen() const
 			// sfen文字列を一意にしておかないと定跡データーをsfen文字列で書き出したときに
 			// 他のソフトで文字列が一致しなくて困るので、この順に倣うことにする。
 
-			const Piece USI_Hand[7] = { ROOK,BISHOP,GOLD,SILVER,KNIGHT,LANCE,PAWN };
+			const PieceType USI_Hand[7] = { ROOK,BISHOP,GOLD,SILVER,KNIGHT,LANCE,PAWN };
 			auto p = USI_Hand[pn];
 
 			// その種類の手駒の枚数
@@ -473,7 +459,7 @@ const std::string Position::sfen() const
 	ss << (found ? " " : "- ");
 
 	// --- 初期局面からの手数
-	ss << gamePly;
+	ss << gamePly_;
 
 	return ss.str();
 }
@@ -497,7 +483,7 @@ void Position::set_state(StateInfo* si) const {
 		si->board_key_ += Zobrist::psq[sq][pc];
 	}
 	for (auto c : COLOR)
-		for (Piece pr = PAWN; pr < PIECE_HAND_NB; ++pr)
+		for (PieceType pr = PAWN; pr < PIECE_HAND_NB; ++pr)
 			si->hand_key_ += Zobrist::hand[c][pr] * (int64_t)hand_count(hand[c], pr); // 手駒はaddにする(差分計算が楽になるため)
 
 	// --- hand
@@ -683,6 +669,7 @@ Bitboard Position::attackers_to(Color c, Square sq, const Bitboard& occ) const
 
 // sに利きのあるc側の駒を列挙する。先後両方。
 // (occが指定されていなければ現在の盤面において。occが指定されていればそれをoccupied bitboardとして)
+// sq == SQ_NBでの呼び出しは合法。ZERO_BBが返る。
 Bitboard Position::attackers_to(Square sq, const Bitboard& occ) const
 {
 	ASSERT_LV3(sq <= SQ_NB);
@@ -747,7 +734,7 @@ bool Position::gives_check(Move m) const
 	ASSERT_LV3(is_ok(m));
 
 	// 移動先
-	const Square to = move_to(m);
+	const Square to = to_sq(m);
 
 	// 駒打ち・移動する指し手どちらであってもmove_piece_after(m)で移動後の駒が取得できるので
 	// 直接王手の処理は共通化できる。
@@ -757,7 +744,7 @@ bool Position::gives_check(Move m) const
 	// -- 移動する指し手ならば、これで開き王手になるかどうかの判定が必要。
 
 	// 移動元
-	const Square from = move_from(m);
+	const Square from = from_sq(m);
 
 	// 開き王手になる駒の候補があるとして、fromにあるのがその駒で、fromからtoは玉と直線上にないなら
 	// 前提条件より、fromにあるのが自駒であることは確定しているので、pieces(sideToMove)は不要。
@@ -919,19 +906,17 @@ template <bool All>
 bool Position::pseudo_legal_s(const Move m) const {
 
 	const Color us = sideToMove;
-	const Square to = move_to(m); // 移動先
+	const Square to = to_sq(m); // 移動先
 
 	if (is_drop(m))
 	{
-		const Piece pr = move_dropped_piece(m);
+		const PieceType pr = move_dropped_piece(m);
 		// 置換表から取り出してきている以上、一度は指し手生成ルーチンで生成した指し手のはずであり、
 		// KING打ちのような値であることはないものとする。
 
-#if defined(KEEP_PIECE_IN_GENERATE_MOVES)
 		// 上位32bitに移動後の駒が格納されている。それと一致するかのテスト
-		if (moved_piece_after(m) != Piece(pr + ((us == WHITE) ? u32(PIECE_WHITE) : 0) + PIECE_DROP))
+		if (moved_piece_after(m) != Piece(pr + (us == WHITE ? u32(PIECE_WHITE) : 0) ))
 			return false;
-#endif
 
 		ASSERT_LV3(PAWN <= pr && pr < KING);
 
@@ -973,7 +958,7 @@ bool Position::pseudo_legal_s(const Move m) const {
 	}
 	else {
 
-		const Square from = move_from(m);
+		const Square from = from_sq(m);
 		const Piece pc = piece_on(from);
 
 		// 動かす駒が自駒でなければならない
@@ -988,7 +973,7 @@ bool Position::pseudo_legal_s(const Move m) const {
 		if (pieces(us) & to)
 			return false;
 
-		Piece pt = type_of(pc);
+		PieceType pt = type_of(pc);
 		if (is_promote(m))
 		{
 			// --- 成る指し手
@@ -998,34 +983,18 @@ bool Position::pseudo_legal_s(const Move m) const {
 			if (pt >= GOLD)
 				return false;
 
-#if defined(KEEP_PIECE_IN_GENERATE_MOVES)
 			// 上位32bitに移動後の駒が格納されている。それと一致するかのテスト
 			// pcが成っていない駒であることは上で確認してあるので、"+ PIECE_PROMOTE"でも十分。
 			if (moved_piece_after(m) != Piece(pc + PIECE_PROMOTE))
 				return false;
-#endif
-
-#if !defined(KEEP_PIECE_IN_GENERATE_MOVES)
-			// 移動先が敵陣でないと成れない。
-			// ただし、Zobrist::side == 1なので先手と後手は常にハッシュ値が異なる。
-			// よって先手と後手の手が置換表衝突する事はない。
-			// また、killer move等に関しては32bit形式であればPieceと成と移動元(先)が矛盾する事はない。
-			// そのため、32bit形式ではこのチェックは不要。
-			if (!(enemy_field(us) & (Bitboard(from) | Bitboard(to))))
-				return false;
-#endif
-
 		}
 		else {
 
 			// --- 成らない指し手
 
-#if defined(KEEP_PIECE_IN_GENERATE_MOVES)
 			// 上位32bitに移動後の駒が格納されている。それと一致するかのテスト
 			if (moved_piece_after(m) != pc)
 				return false;
-#endif
-
 
 			// 駒打ちのところに書いた理由により、不成で進めない升への指し手のチェックも不要。
 			// 間違い　→　駒種をmoveに含めていないならこのチェック必要だわ。
@@ -1109,14 +1078,14 @@ bool Position::legal(Move m) const
 	else
 	{
 		Color us = sideToMove;
-		Square from = move_from(m);
+		Square from = from_sq(m);
 
 		ASSERT_LV5(color_of(piece_on(from_sq(m))) == us);
 		ASSERT_LV5(piece_on(square<KING>(us)) == make_piece(us, KING));
 
 		// もし移動させる駒が玉であるなら、行き先の升に相手側の利きがないかをチェックする。
 		if (type_of(piece_on(from)) == KING)
-			return !effected_to(~us, move_to(m), from);
+			return !effected_to(~us, to_sq(m), from);
 
 		// blockers_for_king()は、pinされている駒(自駒・敵駒)を表現するが、fromにある駒は自駒であることは
 		// わかっているのでこれで良い。
@@ -1127,7 +1096,7 @@ bool Position::legal(Move m) const
 
 
 // 置換表から取り出したMoveを32bit化する。
-Move Position::move16_to_move(Move m) const
+Move Position::to_move(Move16 m16) const
 {
 	//		ASSERT_LV3(is_ok(m));
 	// 置換表から取り出した値なので m==MOVE_NONE(0)である可能性があり、ASSERTは書けない。
@@ -1135,9 +1104,19 @@ Move Position::move16_to_move(Move m) const
 	// 上位16bitは0でなければならない
 	//      ASSERT_LV3((m >> 16) == 0);
 
-	return Move(u16(m) +
-			((is_drop(m) ? (Piece)(make_piece(sideToMove, move_dropped_piece(m)) + PIECE_DROP)
-			: is_promote(m) ? (Piece)(piece_on(move_from(m)) | PIECE_PROMOTE) : piece_on(move_from(m))) << 16)
+	Move m = (Move)m16.to_u16();
+
+	// MOVE_NULLの可能性はないはずだが、MOVE_WINである可能性はある。
+	// それはそのまま返す。(MOVE_WINの機会はごくわずかなのでこれのために
+	// このチェックが探索時に起きるのは少し馬鹿らしい気もする。
+	// どうせ探索時はlegalityのチェックに引っかかり無視されるわけで…)
+	if (!is_ok(m))
+		return m;
+
+	return
+		Move(u16(m) +
+			((is_drop(m) ? (Piece)(make_piece(sideToMove, move_dropped_piece(m)))
+			: is_promote(m) ? (Piece)(piece_on(from_sq(m)) | PIECE_PROMOTE) : piece_on(from_sq(m))) << 16)
 		// "+ PIECE_PROMOTE" だと、玉や成り駒に対して 8足しておかしくなってしまう。(置換表の指し手をpseudo-legalか
 		// 確認せずに置換表の値で枝刈りして、そのあとupdate_statsを行う時に配列境界を超えかねない)
 		// " | PIECE_PROMOTE"が正しいコード。 WCSC29で平岡さんから教えてもらった。[2019/05/04]
@@ -1169,15 +1148,6 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 
 	//std::cout << *this << m << std::endl;
 
-#if defined(USE_FV_VAR)
-	// 前nodeでのdirtyPieceをevalListに反映させていない可能性がある。
-	// 毎node、evaluate()を呼び出すならevaluate()側の責任においてそれは行われるのだが、
-	// positionコマンドなどで特定局面までevaluate()を呼び出さずにdo_move()することがあるので、
-	// ここでそのチェックをしておかなければならない。
-	if (!st->dirtyPiece.updated())
-		st->dirtyPiece.do_update(evalList);
-#endif
-
 	// ----------------------
 	//  StateInfoの更新
 	// ----------------------
@@ -1185,8 +1155,8 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 	// hash key
 
 	// 現在の局面のhash keyはこれで、これを更新していき、次の局面のhash keyを求めてStateInfo::key_に格納。
-	auto k = st->board_key_ ^ Zobrist::side;
-	auto h = st->hand_key_;
+	Key64 k = st->board_key_ ^ Zobrist::side;
+	Key64 h = st->hand_key_;
 
 	// StateInfoの構造体のメンバーの上からkeyのところまでは前のを丸ごとコピーしておく。
 	// undo_moveで戻すときにこの部分はundo処理が要らないので細かい更新処理が必要なものはここに載せておけばundoが速くなる。
@@ -1217,11 +1187,17 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 	st->accumulator.computed_score = false;
 #endif
 
+#if defined(USE_BOARD_EFFECT_PREV)
+	// NNUE-HalfKPE9
+	// 現局面のboard_effectをコピー
+	std::memcpy(board_effect_prev, board_effect, sizeof(board_effect));
+#endif
+
 	// 直前の指し手を保存するならばここで行なう。
 
 #if defined (KEEP_LAST_MOVE)
 	st->lastMove = m;
-	st->lastMovedPieceType = is_drop(m) ? (Piece)move_from(m) : type_of(piece_on(move_from(m)));
+	st->lastMovedPieceType = is_drop(m) ? (PieceType)from_sq(m) : type_of(piece_on(from_sq(m)));
 #endif
 
 	// ----------------------
@@ -1229,18 +1205,16 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 	// ----------------------
 
 	// 移動先の升
-	Square to = move_to(m);
+	Square to = to_sq(m);
 	ASSERT_LV2(is_ok(to));
 
+#if defined (USE_PIECE_VALUE)
 	// 駒割りの差分計算用
 	int materialDiff;
+#endif
 
+#if defined (USE_EVAL_LIST)
 	auto& dp = st->dirtyPiece;
-
-#if defined(USE_FV_VAR)
-	// add()していくので、length = 0にしないといけない。
-	dp.clear();
-	dp.set_state_info(st);
 #endif
 
 	if (is_drop(m))
@@ -1251,7 +1225,7 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 		ASSERT_LV2(piece_on(to) == NO_PIECE);
 
 		Piece pc = moved_piece_after(m);
-		Piece pr = raw_type_of(pc);
+		PieceType pr = raw_type_of(pc);
 		ASSERT_LV2(PAWN <= pr && pr < PIECE_HAND_NB);
 
 		// Zobrist keyの更新
@@ -1269,7 +1243,7 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 		put_piece(to, pc);
 
 		// 打駒した駒に関するevalListの更新。
-#if defined (USE_FV38)
+#if defined (USE_EVAL_LIST)
 		PieceNumber piece_no = piece_no_of(Us, pr);
 		ASSERT_LV3(is_ok(piece_no));
 
@@ -1279,22 +1253,10 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 		dp.changed_piece[0].old_piece = evalList.bona_piece(piece_no);
 		evalList.put_piece(piece_no , to, pc);
 		dp.changed_piece[0].new_piece = evalList.bona_piece(piece_no);
+#endif
 
 		// piece_no_of()のときにこの手駒の枚数を参照するのであとで更新。
 		sub_hand(hand[Us], pr);
-
-#elif defined(USE_FV_VAR)
-
-		// 駒打ちなので手駒が減る。この場合は次のhand_countで必要なので先に更新。
-		sub_hand(hand[Us], pr);
-
-		// 駒打ちなのでpcが玉である可能性はない。
-		dp.remove_piece(Us, pr, hand_count(hand[Us], pr));
-		dp.add_piece(to, pc);
-
-		// 玉の移動ではないことを示しておく。
-		dp.moved_king = COLOR_NB;
-#endif
 
 		// 王手している駒のbitboardを更新する。
 		// 駒打ちなのでこの駒で王手になったに違いない。駒打ちで両王手はありえないので王手している駒はいまtoに置いた駒のみ。
@@ -1318,8 +1280,10 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 		// put_piece()などを用いたのでupdateする
 		update_bitboards();
 
+#if defined(USE_PIECE_VALUE)
 		// 駒打ちなので駒割りの変動なし。
 		materialDiff = 0;
+#endif
 
 #if defined(LONG_EFFECT_LIBRARY)
 		// 駒打ちによる利きの更新処理
@@ -1329,7 +1293,7 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 	} else {
 
 		// -- 駒の移動
-		Square from = move_from(m);
+		Square from = from_sq(m);
 		ASSERT_LV2(is_ok(from));
 
 		// 移動させる駒
@@ -1340,7 +1304,9 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 		// もし成る指し手であるなら、成った後の駒を配置する。
 		Piece moved_after_pc = moved_piece_after(m);
 
+#if defined (USE_PIECE_VALUE)
 		materialDiff = is_promote(m) ? Eval::ProDiffPieceValue[moved_pc] : 0;
+#endif
 
 		// 移動先の升にある駒
 		Piece to_pc = piece_on(to);
@@ -1358,10 +1324,10 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 
 			ASSERT_LV1(type_of(to_pc) != KING);
 
-			Piece pr = raw_type_of(to_pc);
+			PieceType pr = raw_type_of(to_pc);
 
 			// 捕獲した駒に関するevalListの更新
-#if defined (USE_FV38)
+#if defined (USE_EVAL_LIST)
 			// このPieceNumberの駒が手駒に移動したのでEvalListのほうを更新しておく。
 			PieceNumber piece_no = piece_no_of(to);
 			ASSERT_LV3(is_ok(piece_no));
@@ -1370,14 +1336,6 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 			dp.changed_piece[1].old_piece = evalList.bona_piece(piece_no);
 			evalList.put_piece(piece_no, Us, pr, hand_count(hand[Us], pr));
 			dp.changed_piece[1].new_piece = evalList.bona_piece(piece_no);
-#elif defined(USE_FV_VAR)
-
-			// 捕獲された駒の処理なので、これが玉である可能性はない。
-			dp.remove_piece(to,to_pc);
-			dp.add_piece(Us, pr, hand_count(hand[Us], pr));
-
-			//std::cout << hand_count(hand[Us], pr) << Us << pr << std::endl;
-
 #endif
 
 			// 駒取りなら現在の手番側の駒が増える。
@@ -1393,8 +1351,10 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 			// 捕獲した駒をStateInfoに保存しておく。(undo_moveのため)
 			st->capturedPiece = to_pc;
 
+#if defined (USE_PIECE_VALUE)
 			// 評価関数で使う駒割りの値も更新
 			materialDiff += Eval::CapturePieceValue[to_pc];
+#endif
 
 		} else {
 			// 駒を取らない指し手
@@ -1405,12 +1365,12 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 			// 移動先で駒を捕獲しないときの利きの更新
 			LongEffect::update_by_no_capturing_piece<Us>(*this, from, to, moved_pc, moved_after_pc);
 #endif
-#if defined (USE_FV38)
+#if defined (USE_EVAL_LIST)
 			dp.dirty_num = 1; // 動いた駒は1個
 #endif
 		}
 
-#if defined (USE_FV38)
+#if defined (USE_EVAL_LIST)
 		// 移動元にあった駒のpiece_noを得る
 		PieceNumber piece_no2 = piece_no_of(from);
 		dp.pieceNo[0] = piece_no2;
@@ -1422,32 +1382,17 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 		// 移動先の升に駒を配置
 		put_piece(to, moved_after_pc);
 
-#if defined (USE_FV38)
+#if defined (USE_EVAL_LIST)
 		evalList.put_piece(piece_no2, to, moved_after_pc);
 		dp.changed_piece[0].new_piece = evalList.bona_piece(piece_no2);
+#endif
 
 		// 王を移動させる手であるなら、kingSquareを更新しておく。
+		// これを更新しておかないとking_square()が使えなくなってしまう。
 		// 王は駒打できないのでdropの指し手に含まれていることはないから
 		// dropのときにはkingSquareを更新する必要はない。
 		if (type_of(moved_pc) == KING)
 			kingSquare[Us] = to;
-
-#elif defined(USE_FV_VAR)
-		// 移動させる駒が玉であるときはevalListを更新する必要がない。
-		// ただし、玉が移動したことを示す必要はある。
-		if (type_of(moved_pc) == KING)
-		{
-			kingSquare[Us] = to;
-			dp.moved_king = Us;
-		}
-		else
-		{
-			//dp.remove_piece(from, moved_pc);
-			//dp.add_piece(to, moved_after_pc);
-			dp.remove_and_add_piece(from, moved_pc, to, moved_after_pc);
-			dp.moved_king = COLOR_NB; // 玉の移動ではないことを示しておく。
-		}
-#endif
 
 		// fromにあったmoved_pcがtoにmoved_after_pcとして移動した。
 		k -= Zobrist::psq[from][moved_pc];
@@ -1546,8 +1491,10 @@ void Position::do_move_impl(Move m, StateInfo& new_st, bool givesCheck)
 	// 相手番のほうは関係ないので前ノードの値をそのまま受け継ぐ。
 	st->continuousCheck[~Us] = prev->continuousCheck[~Us];
 
+#if defined (USE_PIECE_VALUE)
 	st->materialValue = (Value)(st->previous->materialValue + (Us == BLACK ? materialDiff : -materialDiff));
 	//ASSERT_LV5(st->materialValue == Eval::material(*this));
+#endif
 
 	// 相手番に変更する。
 	sideToMove = ~Us;
@@ -1577,13 +1524,13 @@ Key Position::key_after(Move m) const {
 	auto h = st->hand_key_;
 
 	// 移動先の升
-	Square to = move_to(m);
+	Square to = to_sq(m);
 	ASSERT_LV2(is_ok(to));
 
 	if (is_drop(m))
 	{
 		// --- 駒打ち
-		Piece pr = move_dropped_piece(m);
+		PieceType pr = move_dropped_piece(m);
 		ASSERT_LV2(PAWN <= pr && pr < PIECE_HAND_NB);
 
 		Piece pc = make_piece(Us, pr);
@@ -1595,7 +1542,7 @@ Key Position::key_after(Move m) const {
 	else
 	{
 		// -- 駒の移動
-		Square from = move_from(m);
+		Square from = from_sq(m);
 		ASSERT_LV2(is_ok(from));
 
 		// 移動させる駒
@@ -1618,7 +1565,7 @@ Key Position::key_after(Move m) const {
 		Piece to_pc = piece_on(to);
 		if (to_pc != NO_PIECE)
 		{
-			Piece pr = raw_type_of(to_pc);
+			PieceType pr = raw_type_of(to_pc);
 
 			// 捕獲された駒が盤上から消えるので局面のhash keyを更新する
 			k -= Zobrist::psq[to][to_pc];
@@ -1640,28 +1587,16 @@ void Position::undo_move_impl(Move m)
 {
 	// Usは1手前の局面での手番(に呼び出し元でしてある)
 
-	auto to = move_to(m);
+	auto to = to_sq(m);
 	ASSERT_LV2(is_ok(to));
 
 	// --- 移動後の駒
 
-	// 手番が変わるのでKEEP_PIECE_IN_GENERATE_MOVESを定義していないときに
-	// moved_piece_after()を呼び出すのは正しく動作しない。
-	Piece moved_after_pc =
-#if defined(KEEP_PIECE_IN_GENERATE_MOVES)
-		moved_piece_after(m);
-#else
-		piece_on(to);
-#endif
+	Piece moved_after_pc = moved_piece_after(m);
 
-#if defined(USE_FV38)
+#if defined (USE_EVAL_LIST)
 	PieceNumber piece_no = piece_no_of(to); // 移動元のpiece_no == いまtoの場所にある駒のpiece_no
 	ASSERT_LV3(is_ok(piece_no));
-#elif defined(USE_FV_VAR)
-	// do_move()のあとevaluate()を呼び出していないなら、eval_listの更新がなされていないのでundo不要。
-	auto&dp = st->dirtyPiece;
-	if (dp.updated())
-		st->dirtyPiece.undo_update(evalList);
 #endif
 
 	// 移動前の駒
@@ -1677,9 +1612,9 @@ void Position::undo_move_impl(Move m)
 		// --- 駒打ち
 
 		// toの場所にある駒を手駒に戻す
-		Piece pt = raw_type_of(moved_after_pc);
+		PieceType pt = raw_type_of(moved_after_pc);
 
-#if defined(USE_FV38)
+#if defined (USE_EVAL_LIST)
 		evalList.put_piece(piece_no, Us, pt, hand_count(hand[Us], pt));
 #endif
 
@@ -1697,7 +1632,7 @@ void Position::undo_move_impl(Move m)
 
 		// --- 通常の指し手
 
-		auto from = move_from(m);
+		auto from = from_sq(m);
 		ASSERT_LV2(is_ok(from));
 
 		// toの場所から駒を消す
@@ -1714,7 +1649,7 @@ void Position::undo_move_impl(Move m)
 			put_piece(to, to_pc);
 			put_piece(from, moved_pc);
 
-#if defined(USE_FV38)
+#if defined (USE_EVAL_LIST)
 			PieceNumber piece_no2 = piece_no_of(Us, raw_type_of(to_pc)); // 捕っていた駒(手駒にある)のpiece_no
 			ASSERT_LV3(is_ok(piece_no2));
 
@@ -1742,7 +1677,7 @@ void Position::undo_move_impl(Move m)
 
 			put_piece(from, moved_pc);
 
-#if defined(USE_FV38)
+#if defined (USE_EVAL_LIST)
 			// 成りの指し手だったなら非成りの駒がfromの場所に戻る。さもなくばそのまま戻る。
 			evalList.put_piece(piece_no, from, moved_pc);
 #endif
@@ -1798,17 +1733,20 @@ void Position::do_null_move(StateInfo& newSt) {
 	ASSERT_LV3(!checkers());
 	ASSERT_LV3(&newSt != st);
 
-#if defined(USE_FV_VAR)
-	// evalListがupdateされずにdo_null_move()を呼び出している可能性がある。do_move()のほうの説明を読むこと。
-	if (!st->dirtyPiece.updated())
-		st->dirtyPiece.do_update(evalList);
-#endif
-
 	// この場合、StateInfo自体は丸ごとコピーしておかないといけない。(他の初期化をしないので)
 	// よく考えると、StateInfo、新しく作る必要もないのだが…。まあ、CheckInfoがあるので仕方ないか…。
 	std::memcpy(&newSt, st, sizeof(StateInfo));
+
+	// TODO : NNUEの場合、accumulatorのコピー不要なのでは…？
+	//std::memcpy(&newSt, st, offsetof(StateInfo, accumulator));
+
 	newSt.previous = st;
 	st = &newSt;
+
+#if defined(EVAL_NNUE)
+	// NNUEの場合、KPPT型と違って、手番が違う場合、計算なしに済ますわけにはいかない。
+	st->accumulator.computed_score = false;
+#endif
 
 	st->board_key_ ^= Zobrist::side;
 
@@ -1823,18 +1761,23 @@ void Position::do_null_move(StateInfo& newSt) {
 	// これは、さっきアクセスしたところのはずなので意味がない。
 	//  Eval::prefetch_evalhash(key);
 
-#if defined(EVAL_NNUE)
-#if defined(USE_EVAL_HASH)
+#if defined(EVAL_NNUE) && defined(USE_EVAL_HASH)
+	// NNUEのEvalHashの場合、手番が違うと異なるentry(のはず)
 	Eval::prefetch_evalhash(key);
 #endif
-	st->accumulator.computed_score = false;
-#endif
+
+	//++st->rule50;
 
 	st->pliesFromNull = 0;
 
 	sideToMove = ~sideToMove;
 
 	set_check_info<true>(st);
+
+	//st->repetition = 0;
+
+	//assert(pos_is_ok());
+
 }
 
 void Position::undo_null_move()
@@ -1869,7 +1812,7 @@ namespace {
 
 	// 返し値は今回発見されたtoに利く最小の攻撃駒。これがtoの地点において成れるなら成ったあとの駒を返すべき。
 
-	Piece min_attacker(const Position& pos, const Square& to
+	PieceType min_attacker(const Position& pos, const Square& to
 		, const Bitboard& stmAttackers, Bitboard& occupied, Bitboard& attackers
 	) {
 
@@ -2016,11 +1959,11 @@ bool Position::see_ge(Move m, Value threshold) const
 	// 駒の移動元(駒打ちの場合は)、移動先
 	// dropのときにはSQ_NBにしておくことで、pieces() ^ fromを無効化するhack
 	Square from = drop ? SQ_NB : from_sq(m);
-	Square to = move_to(m);
+	Square to = to_sq(m);
 
 	// 次にtoの升で捕獲される駒
 	// 成りなら成りを評価したほうが良い可能性があるが、このあとの取り合いで指し手の成りを評価していないので…。
-	Piece nextVictim = drop ? move_dropped_piece(m) : type_of(piece_on(from));
+	PieceType nextVictim = drop ? move_dropped_piece(m) : type_of(piece_on(from));
 
 	// 以下のwhileで想定している手番。
 	// 移動させる駒側の手番から始まるものとする。
@@ -2245,6 +2188,7 @@ bool Position::has_game_cycle(int plies_from_root, int rep_ply /*= 16*/) const
 //      入玉判定
 // ----------------------------------
 
+#if defined(USE_ENTERING_KING_WIN)
 Move Position::DeclarationWin() const
 {
 	auto rule = Search::Limits.enteringKingRule;
@@ -2346,7 +2290,7 @@ Move Position::DeclarationWin() const
 			return MOVE_NONE;
 
 		// 王の移動の指し手により勝ちが確定する
-		return make_move(king_sq, king_try_sq);
+		return make_move(king_sq, king_try_sq, us,KING);
 	}
 
 	default:
@@ -2354,6 +2298,7 @@ Move Position::DeclarationWin() const
 		return MOVE_NONE;
 	}
 }
+#endif
 
 // ----------------------------------
 //      内部情報の正当性のテスト
