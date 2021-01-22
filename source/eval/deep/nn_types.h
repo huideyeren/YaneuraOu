@@ -21,7 +21,7 @@ namespace Eval::dlshogi
 	// 歩が先手の手駒に9枚の状況だとして、残り7枚は相手の手駒 or 盤上にあるはずだし、盤上の歩は入力特徴量として持っているので
 	// 駒割自体は正しく計算できるはず。
 	// MAX_HPAWN_NUMが7だと、手駒を先手が9枚、後手が7枚持っているような状況だと、どちらが数多く持っているのかが判定できないのでまずい。
-
+	
 	constexpr int MAX_HPAWN_NUM   = 8; // 歩の持ち駒の上限
 	constexpr int MAX_HLANCE_NUM  = 4;
 	constexpr int MAX_HKNIGHT_NUM = 4;
@@ -138,6 +138,10 @@ namespace Eval::dlshogi
 
 	// 価値(勝率)を評価値[cp]に変換。
 	// USIではcp(centi-pawn)でやりとりするので、そのための変換に必要。
+	// 返し値 :
+	//   +29900は、評価値の最大値
+	//   -29900は、評価値の最小値
+	//   +30000,-30000は、(おそらく)詰みのスコア
 	Value value_to_cp(const float score);
 
 	// エンジンオプションで設定されたモデルファイル名。(フォルダ名含む)

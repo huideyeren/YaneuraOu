@@ -20,8 +20,8 @@ namespace dlshogi
 
 	DlshogiSearcher::DlshogiSearcher()
 	{
-		search_groups = std::make_unique<UctSearcherGroup[]>(max_gpu);
-		gc = std::make_unique<NodeGarbageCollector>();
+		search_groups        = std::make_unique<UctSearcherGroup[]>(max_gpu);
+		gc                   = std::make_unique<NodeGarbageCollector>();
 		interruption_checker = std::make_unique<SearchInterruptionChecker>(this);
 		root_dfpn_searcher   = std::make_unique<RootDfpnSearcher>(this);
 	}
@@ -34,13 +34,45 @@ namespace dlshogi
 		search_options.usi_ponder = flag;
 	}
 
+	// 詰み探索の設定
+	// 　　root_mate_search_nodes_limit : root nodeでのdf-pn探索のノード数上限。 (Options["RootMateSearchNodesLimit"]の値)
+	// 　　max_moves_to_draw            : 引き分けになる最大手数。               (Options["MaxMovesToDraw"]の値)
+	//     mate_search_ply              : leaf nodeで奇数手詰めを呼び出す時の手数(Options["MateSearchPly"]の値)
+	// それぞれの引数の値は、同名のsearch_optionsのメンバ変数に代入される。
+	void DlshogiSearcher::SetMateLimits(int max_moves_to_draw, u32 root_mate_search_nodes_limit, int mate_search_ply)
+	{
+		search_options.root_mate_search_nodes_limit = root_mate_search_nodes_limit;
+		search_options.max_moves_to_draw            = max_moves_to_draw;
+		search_options.mate_search_ply              = mate_search_ply;
+	}
+
+	// root nodeでの詰め将棋ルーチンの呼び出しに関する条件を設定し、メモリを確保する。
+	void DlshogiSearcher::InitMateSearcher()
+	{
+		// -- root nodeでdf-pn solverを呼び出す時。
+
+		// メモリを確保(探索ノード数を設定してそれに応じたメモリを確保する)
+		root_dfpn_searcher->alloc           (search_options.root_mate_search_nodes_limit);
+
+		// 引き分けになる手数の設定
+		root_dfpn_searcher->set_max_game_ply(search_options.max_moves_to_draw);
+	}
+
 	// GPUの初期化、各UctSearchThreadGroupに属するそれぞれのスレッド数と、各スレッドごとのNNのbatch sizeの設定
 	// "isready"に対して呼び出される。
+	// スレッドの生成ついでに、詰将棋探索系の初期化もここで行う。
 	//
-	// root_mate_search_nodes_limit : root nodeでのdf-pn探索のノード数上限
-	void DlshogiSearcher::InitGPU(const std::vector<std::string>& model_paths , std::vector<int> new_thread, std::vector<int> policy_value_batch_maxsizes,
-			u32 root_mate_search_nodes_limit)
+	// 呼び出しの前提条件)
+	//   SetMateLimits()を呼び出すことによって、以下の3つの変数には事前に値が設定されているものとする。
+	// 　　search_options.root_mate_search_nodes_limit : root nodeでのdf-pn探索のノード数上限。 (Options["RootMateSearchNodesLimit"]の値)
+	// 　　search_options.max_moves_to_draw            : 引き分けになる最大手数。               (Options["MaxMovesToDraw"]の値)
+	//     search_options.mate_search_ply              : leaf nodeで奇数手詰めを呼び出す時の手数(Options["MateSearchPly"]の値)
+	void DlshogiSearcher::InitGPU(const std::vector<std::string>& model_paths , std::vector<int> new_thread, std::vector<int> policy_value_batch_maxsizes)
 	{
+		// ----------------------
+		// 必要なスレッド数の算出
+		// ----------------------
+
 		ASSERT_LV3(model_paths.size() == max_gpu);
 		ASSERT_LV3(new_thread.size() == max_gpu);
 		ASSERT_LV3(policy_value_batch_maxsizes.size() == max_gpu);
@@ -59,19 +91,20 @@ namespace dlshogi
 			return;
 		}
 
-		// rootでの詰み探索用のスレッド数
-		// 探索するなら1スレッド割り当てる。
-		int dfpn_thread_num = (root_mate_search_nodes_limit > 0) ? 1 : 0;
-		search_options.root_mate_search_nodes_limit = root_mate_search_nodes_limit;
-		if (root_mate_search_nodes_limit)
-			root_dfpn_searcher->alloc(root_mate_search_nodes_limit);
+		// ----------------------
+		//    スレッドの確保
+		// ----------------------
 
-		// まず、数だけ確保
+		// root nodeでの詰み探索用のスレッド数
+		const int dfpn_thread_num = (search_options.root_mate_search_nodes_limit > 0) ? 1 : 0;
+
+		// 探索の終了条件を満たしたかを監視するためのスレッド数
+		const int search_interruption_check_thread_num = 1;
+
 		// やねうら王のThreadPoolクラスは、前回と異なるスレッド数であれば自動的に再確保される。
-		// interruption_check_threadの分、+1して確保する。
 		// GC用のスレッドも探索スレッドから割り当てたのだが、それは良くないアイデアだった。
 		// ※　GC処理が終わらなくて、全探索スレッドの終了を待つコードになっているから、bestmoveが返せないことがある。
-		Threads.set(total_thread_num + dfpn_thread_num + 1);
+		Threads.set(total_thread_num + dfpn_thread_num + search_interruption_check_thread_num);
 
 		for (int i = 0; i < max_gpu; i++) {
 			if (new_thread[i] > 0) {
@@ -91,7 +124,9 @@ namespace dlshogi
 			}
 		}
 
-		// -- やねうら王独自拡張
+		// ----------------------
+		// 探索スレッドとUctSearcherの紐付け
+		// ----------------------
 
 		// 何番目のスレッドがどのUctSearcherGroupのインスタンスに割り当たるのかのmapperだけ設定しておいてやる。
 		// Thread::search()からは、このmapperを使って、UctSearchGroup::search()を呼び出す。
@@ -105,6 +140,18 @@ namespace dlshogi
 		// GC用のスレッドにもスレッド番号を連番で与えておく。
 		// (WinProcGroup::bindThisThread()用)
 		gc->set_thread_id(total_thread_num + dfpn_thread_num);
+
+		// ----------------------
+		// 詰将棋探索系の初期化
+		// ----------------------
+
+		// root nodeで詰み探索するならそのためのメモリを確保する。
+		if (dfpn_thread_num)
+			InitMateSearcher();
+
+		// leaf nodeでの詰み探索用のMateSolverの初期化
+		for (auto& uct_searcher : thread_id_to_uct_searcher)
+			uct_searcher->InitMateSearcher(search_options);
 	}
 
 	// 全スレッドでの探索開始
@@ -298,7 +345,7 @@ namespace dlshogi
 	//   gameRootSfen  : 対局開始局面のsfen文字列(探索開始局面ではない)
 	//   moves         : 探索開始局面からの手順
 	//   ponderMove    : [Out] ponderの指し手(ないときはMOVE_NONEが代入される)
-	// 返し値 : この局面でのbestな指し手
+	//   返し値 : この局面でのbestな指し手
 	// ponderの場合は、呼び出し元で待機すること。
 	Move DlshogiSearcher::UctSearchGenmove(Position* pos, const std::string& gameRootSfen, const std::vector<Move>& moves, Move& ponderMove)
 	{
@@ -345,40 +392,29 @@ namespace dlshogi
 
 		// ExpandRoot()が呼び出されている以上、子ノードの初期化は完了していて、この局面の合法手の数がchild_numに
 		// 代入されているはず。これが0であれば、合法手がないということだから、詰みの局面であり、探索ができることは何もない。
-		const int child_num = current_root->child_num;
+		const ChildNumType child_num = current_root->child_num;
 		if (child_num == 0) {
 			// 投了しておく。
 			return MOVE_RESIGN;
 		}
 
 		// ---------------------
-		//     詰みのチェック
+		//     宣言勝ちのチェック
 		// ---------------------
 
-		// この局面で子ノードから伝播されて、勝ちが確定している。
-		if (current_root->value_win == VALUE_WIN)
 		{
-			if (!pos->in_check())
+			// 宣言勝ちか？
+			Move move = pos->DeclarationWin();
+
+			if (move)
 			{
-				// 詰みを発見しているはず
-				// Solverで解かせてみる。
-
-				// 宣言勝ちか？
-				Move move = pos->DeclarationWin();
-
-				if (move)
-					return move;
-
-				// いくらなんでも5手詰めで発見できるはずだが？
-				move = mate_solver.mate_odd_ply(*pos, 5 ,true);
-
-				if (move)
-					return move;
-
-				// これ、子ノードのいずれかは勝ちのはずだからその子ノードを選択したほうが良いのでは…。
-				// 伝播された勝ちが本当ならば、だが。
-				// とりま、↓以下、普通に探索する。
+				// 宣言勝ち
+				sync_cout << "info score mate 1 pv MOVE_WIN" << sync_endl;
+				return move;
 			}
+
+			// 詰みはdf-pnで詰め探索をしているので何もせずとも普通に見つけるはず…。
+			// ここでN手詰めを呼び出すと、解けた時に読み筋が出ないのであまり嬉しくない。
 		}
 
 		// ---------------------
@@ -404,7 +440,8 @@ namespace dlshogi
 		// ---------------------
 
 		// 前回、この現在の探索局面を何回訪問したのか
-		NodeCountType pre_simulated = current_root->move_count;
+		const NodeCountType pre_simulated = current_root->move_count != NOT_EXPANDED
+			? current_root->move_count.load() : 0;
 
 		// 探索時間とプレイアウト回数の予測値を出力
 		if (search_options.debug_message)
@@ -539,8 +576,8 @@ namespace dlshogi
 		// 探索depth固定
 		// →　PV掘らないとわからないので実装しない。
 
-			// 探索ノード固定(NodesLimitで設定する)
-			//   ※　この時、時間制御は行わない
+		// 探索ノード固定(NodesLimitで設定する)
+		//   ※　この時、時間制御は行わない
 		if (s.nodes_limit)
 		{
 			if (s.nodes_searched >= s.nodes_limit)
@@ -550,8 +587,10 @@ namespace dlshogi
 			return;
 		}
 
-			// hashfull
-		if ((NodeCountType)s.current_root->move_count >= o.uct_node_limit)
+		// hashfull
+		// s.current_root->move_count == NOT_EXPANDED  開始まもなくはこれでありうるので、
+		// +1してから比較する。(NOT_EXPANDEDはu32::max()なので+1すると0になる)
+		if ( (NodeCountType)(s.current_root->move_count + 1) > o.uct_node_limit)
 		{
 			// これは、時間制御の対象外。
 			// ただちに中断すべき。(メモリ足りなくなって死ぬので)
@@ -559,7 +598,7 @@ namespace dlshogi
 			interrupt();
 			return;
 		}
-			
+
 		// リミットなしなので"stop"が来るまで停止しない。
 		// ただしhashfullの判定は先にやっておかないと、メモリ使い切ってしまう。
 		if (s.infinite)
@@ -591,8 +630,8 @@ namespace dlshogi
 			}
 			else {
 				// 探索終了時刻は設定されているのでこれ以上、探索打ち切りの判定は不要。
-			return;
-		}
+				return;
+			}
 
 		const Node* current_root = tree->GetCurrentHead();
 		const int child_num = current_root->child_num;
@@ -745,14 +784,14 @@ namespace dlshogi
 
 		// 通常の探索スレッドは、並列UCT探索へ。
 		if (thread_id < s)
-		thread_id_to_uct_searcher[thread_id]->ParallelUctSearch(rootPos);
+			thread_id_to_uct_searcher[thread_id]->ParallelUctSearchStart(rootPos);
 
 		// 探索終了判定用。
 		else if (thread_id == s)
 			interruption_checker->Worker();
 
 		else if (thread_id == s + 1)
-			root_dfpn_searcher->search(rootPos, search_options.root_mate_search_nodes_limit);
+			root_dfpn_searcher->search(rootPos, search_options.root_mate_search_nodes_limit); // df-pnの探索ノード数制限
 
 		else
 			ASSERT_LV3(false);
@@ -811,12 +850,19 @@ namespace dlshogi
 	void RootDfpnSearcher::alloc(u32 nodes_limit)
 	{
 		// 子ノードを展開するから、探索ノード数の8倍ぐらいのメモリを要する
-		solver->alloc_by_nodes_limit(nodes_limit * 8);
+		solver->alloc_by_nodes_limit((size_t)(nodes_limit * 8));
+	}
+
+	// 引き分けになる手数の設定
+	// max_game_ply = 引き分けになるgame ply。この値になった時点で不詰扱い。
+	void RootDfpnSearcher::set_max_game_ply(int max_game_ply)
+	{
+		solver->set_max_game_ply(max_game_ply);
 	}
 
 	// df-pn探索する。
 	// この関数を呼び出すとsearching = trueになり、探索が終了するとsearching = falseになる。
-	// nodes_limit = 探索ノード数上限
+	// nodes_limit   = 探索ノード数上限
 	void RootDfpnSearcher::search(const Position& rootPos , u32 nodes_limit)
 	{
 		searching = true;

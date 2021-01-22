@@ -504,6 +504,11 @@ constexpr PieceType type_of(Piece pc) { return (PieceType)(pc & 15); }
 // ただし、pc == KINGでの呼び出しはNO_PIECEが返るものとする。
 constexpr PieceType raw_type_of(Piece pc) { return (PieceType)(pc & 7); }
 
+// 成ってない駒を返す。
+// 例) 成銀→銀 , 後手の馬→後手の角
+// ただし、pc == KINGでの呼び出しはNO_PIECEが返るものとする。
+constexpr Piece raw_of(Piece pc) { return (Piece)(pc & ~8); }
+
 // pcとして先手の駒を渡し、cが後手なら後手の駒を返す。cが先手なら先手の駒のまま。pcとしてNO_PIECEは渡してはならない。
 constexpr Piece make_piece(Color c, PieceType pt) { /*ASSERT_LV3(color_of(pt) == BLACK && pt!=NO_PIECE); */ return (Piece)((c << 4) + pt); }
 
@@ -552,8 +557,13 @@ constexpr bool is_ok(PieceNumber pn) { return pn < PIECE_NUMBER_NB; }
 
 struct Move16;
 
-// 指し手 bit0..6 = 移動先のSquare、bit7..13 = 移動元のSquare(駒打ちのときは駒種)、bit14..駒打ちか、bit15..成りか
-// 32bit形式の指し手の場合、上位16bitには、この指し手によってto(移動後の升)に来る駒(先後の区別あり)が格納されている。
+// Move16 : 16bit形式の指し手
+//   指し手 bit0..6 = 移動先のSquare、bit7..13 = 移動元のSquare(駒打ちのときは駒種)、bit14..駒打ちか、bit15..成りか
+// Move   : 32bit形式の指し手
+//   上位16bitには、この指し手によってto(移動後の升)に来る駒(先後の区別あり)が格納されている。つまりは Piece(5bit)が上位16bitに来る。
+//   move = move16 + (piece << 16)
+// なので、Moveが使うのは、16bit(Move16) + 5bit(Piece) = 下位21bit
+//
 enum Move: uint32_t {
 
 	MOVE_NONE    = 0,             // 無効な移動
@@ -610,15 +620,15 @@ static std::ostream& operator<<(std::ostream& os, Move m)   { os << to_usi_strin
 static std::ostream& operator<<(std::ostream& os, Move16 m) { os << to_usi_string(m); return os; }
 
 // 指し手の移動元の升を返す。
-constexpr Square from_sq(Move m) { return Square((m >> 7) & 0x7f); }
+constexpr Square from_sq(Move   m) { return Square((m          >> 7) & 0x7f); }
 static    Square from_sq(Move16 m) { return Square((m.to_u16() >> 7) & 0x7f); }
 
 // 指し手の移動先の升を返す。
-constexpr Square to_sq(Move m) { return Square(m & 0x7f); }
+constexpr Square to_sq(Move   m) { return Square(m          & 0x7f); }
 static    Square to_sq(Move16 m) { return Square(m.to_u16() & 0x7f); }
 
 // 指し手が駒打ちか？
-constexpr bool is_drop(Move m){ return (m & MOVE_DROP)!=0; }
+constexpr bool is_drop(Move   m){ return (m          & MOVE_DROP)!=0; }
 static    bool is_drop(Move16 m){ return (m.to_u16() & MOVE_DROP)!=0; }
 
 // fromとtoをシリアライズする。駒打ちのときのfromは普通の移動の指し手とは異なる。
@@ -627,12 +637,12 @@ constexpr int from_to(Move   m) { return (int)(from_sq(m) + (is_drop(m) ? (SQ_NB
 static    int from_to(Move16 m) { return (int)(from_sq(m) + (is_drop(m) ? (SQ_NB - 1) : 0)) * (int)SQ_NB + (int)to_sq(m); }
 
 // 指し手が成りか？
-constexpr bool is_promote(Move m) { return (m & MOVE_PROMOTE)!=0; }
+constexpr bool is_promote(Move   m) { return (m          & MOVE_PROMOTE)!=0; }
 static    bool is_promote(Move16 m) { return (m.to_u16() & MOVE_PROMOTE)!=0; }
 
 // 駒打ち(is_drop()==true)のときの打った駒
 // 先後の区別なし。PAWN～ROOKまでの値が返る。
-constexpr PieceType move_dropped_piece(Move m) { return (PieceType)((m >> 7) & 0x7f); }
+constexpr PieceType move_dropped_piece(Move   m) { return (PieceType)((m          >> 7) & 0x7f); }
 static    PieceType move_dropped_piece(Move16 m) { return (PieceType)((m.to_u16() >> 7) & 0x7f); }
 
 // us側のptをfromからtoに移動させる指し手を生成して返す。
@@ -696,7 +706,7 @@ constexpr MoveType type_of(Move m) { return MoveType(m & (MOVE_PROMOTE | MOVE_DR
 // オーダリングのときにスコアで並べ替えしたいが、一つになっているほうが並び替えがしやすいのでこうしてある。
 struct ExtMove {
 
-	Move move;   // 指し手(32bit)
+	Move move;  // 指し手(32bit)
 	int value;	// 指し手オーダリング(並び替え)のときのスコア(符号つき32bit)
 
 	// Move型とは暗黙で変換できていい。

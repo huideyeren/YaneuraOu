@@ -38,6 +38,7 @@ namespace Test
 		if (mate_test_cmd(pos,is,token))
 			return;
 
+		sync_cout << "Error! : unknown command = " << token << sync_endl;
 	}
 
 }
@@ -69,7 +70,7 @@ void mate_cmd(Position& pos, istream& is);
 // ----------------------------------
 
 // 定跡を作るコマンド
-#if defined(ENABLE_MAKEBOOK_CMD)
+#if defined (ENABLE_MAKEBOOK_CMD) && defined(EVAL_LEARN)
 namespace Book { extern void makebook_cmd(Position& pos, istringstream& is); }
 #endif
 
@@ -176,7 +177,7 @@ namespace USI
 				ss << " multipv " << (i + 1);
 
 			ss << " nodes " << nodes_searched
-			   << " nps " << nodes_searched * 1000 / elapsed;
+			   << " nps "   << nodes_searched * 1000 / elapsed;
 
 			// 置換表使用率。経過時間が短いときは意味をなさないので出力しない。
 			if (elapsed > 1000)
@@ -489,8 +490,8 @@ void setoption_cmd(istringstream& is)
 	if (Options.count(name))
 		Options[name] = value;
 	else
-		// この名前のoptionは存在しなかった
-		sync_cout << "Error! : No such option: " << name << sync_endl;
+			// この名前のoptionは存在しなかった
+			sync_cout << "Error! : No such option: " << name << sync_endl;
 
 }
 
@@ -617,23 +618,23 @@ void go_cmd(const Position& pos, istringstream& is , StateListPtr& states) {
 #if defined(TANUKI_MATE_ENGINE)
 		// MateEngineのデバッグ用コマンド: 詰将棋の特定の変化に対する解析を効率的に行うことが出来る。
 		//	cf.https ://github.com/yaneurao/YaneuraOu/pull/115
-			
+
 		else if (token == "matedebug") {
-		  string token="";
+			string token="";
 			Move16 m;
-		  limits.pv_check.clear();
+			limits.pv_check.clear();
 			while (is >> token && (m = USI::to_move16(token)) != MOVE_NONE){
-		    limits.pv_check.push_back(m);
-		  }
+				limits.pv_check.push_back(m);
+			}
 		}
 #endif
 
 		// パフォーマンステスト(Stockfishにある、合法手N手で到達できる局面を求めるやつ)
 		// このあとposition～goコマンドを使うとパフォーマンステストモードに突入し、ここで設定した手数で到達できる局面数を求める
-		else if (token == "perft")     is >> limits.perft;
+		else if (token == "perft")		is >> limits.perft;
 
 		// 時間無制限。
-		else if (token == "infinite")  limits.infinite = 1;
+		else if (token == "infinite")	limits.infinite = 1;
 
 		// ponderモードでの思考。
 		else if (token == "ponder")		ponderMode = true;
@@ -881,7 +882,7 @@ void USI::loop(int argc, char* argv[])
 		else if (token == "test") Test::test_cmd(pos, is);
 #endif
 
-#if defined (ENABLE_MAKEBOOK_CMD)
+#if defined (ENABLE_MAKEBOOK_CMD) && defined(EVAL_LEARN)
 		// 定跡を作るコマンド
 		else if (token == "makebook") Book::makebook_cmd(pos, is);
 #endif
@@ -969,9 +970,7 @@ std::string USI::value(Value v)
 		// USIプロトコルでは、手数がわからないときには "mate -"と出力するらしい。
 		// 手数がわからないというか詰んでいるのだが…。これを出力する方法がUSIプロトコルで定められていない。
 		// ここでは"-0"を出力しておく。
-		// 将棋所では検討モードは、go infiniteで呼び出されて、このときbestmoveを返さないから
-		// 結局、このときのスコアは画面に表示されない。
-		// ShogiGUIだと、これできちんと"+詰"と出力されるようである。
+		// ※　ShogiGUIだと、これで"+詰"と出力されるようである。
 		s << "mate -0";
 	else
 		s << "mate " << (v > 0 ? VALUE_MATE - v : -VALUE_MATE - v);
@@ -993,10 +992,10 @@ std::string USI::move(Move16 m)
 	if (!is_ok(m))
 	{
 		ss << ((m == MOVE_RESIGN) ? "resign" :
-			(m == MOVE_WIN) ? "win" :
-			(m == MOVE_NULL) ? "null" :
-			(m == MOVE_NONE) ? "none" :
-			"");
+			   (m == MOVE_WIN)    ? "win" :
+			   (m == MOVE_NULL)   ? "null" :
+			   (m == MOVE_NONE)   ? "none" :
+			    "");
 	}
 	else if (is_drop(m))
 	{
@@ -1076,15 +1075,15 @@ Move16 USI::to_move16(const string& str)
 	{
 		// さすがに3文字以下の指し手はおかしいだろ。
 		if (str.length() <= 3)
-				goto END;
-	
+			goto END;
+
 		Square to = usi_to_sq(str[2], str[3]);
 		if (!is_ok(to))
-				goto END;
-	
+			goto END;
+
 		bool promote = str.length() == 5 && str[4] == '+';
 		bool drop = str[1] == '*';
-	
+
 		if (!drop)
 		{
 			Square from = usi_to_sq(str[0], str[1]);

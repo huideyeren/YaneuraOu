@@ -52,7 +52,7 @@ void USI::extra_option(USI::OptionsMap& o)
 #endif // !MAKE_BOOK
 
 	o["UCT_NodeLimit"]				 << USI::Option(10000000, 100000, 1000000000); // UCTノードの上限
-	// デバッグ用のメッセージ出力の有無
+																				   // デバッグ用のメッセージ出力の有無
 	o["DebugMessage"]                << USI::Option(false);
 
 	// ノードを再利用するか。
@@ -192,15 +192,21 @@ void Search::clear()
 		(int)Options["DNN_Batch_Size5"], (int)Options["DNN_Batch_Size6"], (int)Options["DNN_Batch_Size7"], (int)Options["DNN_Batch_Size8"]
 	};
 
+	// 対応デバイス数を取得する
+	int device_count = NN::get_device_count();
+
 	std::vector<int> thread_nums;
 	std::vector<int> policy_value_batch_maxsizes;
 	for (int i = 0; i < max_gpu; ++i)
 	{
-		thread_nums.push_back(new_thread[i]);
+		// 対応デバイス数以上のデバイスIDのスレッド数は 0 として扱う(デバイスの無効化)
+		thread_nums.push_back(i < device_count ? new_thread[i] : 0);
 		policy_value_batch_maxsizes.push_back(new_policy_value_batch_maxsize[i]);
 	}
 
-	searcher.InitGPU(Eval::dlshogi::ModelPaths , thread_nums, policy_value_batch_maxsizes , (u32)Options["RootMateSearchNodesLimit"]);
+	// ※　InitGPU()に先だってSetMateLimits()でのmate solverの初期化が必要。この呼出をInitGPU()のあとにしないこと！
+	searcher.SetMateLimits((int)Options["MaxMovesToDraw"] , (u32)Options["RootMateSearchNodesLimit"] , (int)Options["MateSearchPly"]);
+	searcher.InitGPU(Eval::dlshogi::ModelPaths , thread_nums, policy_value_batch_maxsizes);
 
 	// その他、dlshogiにはあるけど、サポートしないもの。
 
@@ -235,8 +241,6 @@ void Search::clear()
 
 	searcher.InitializeUctSearch((NodeCountType)Options["UCT_NodeLimit"]);
 
-	searcher.search_options.mate_search_ply = (int)Options["MateSearchPly"];
-
 #if 0
 	// dlshogiでは、
 	// "isready"に対してnode limit = 1 , batch_size = 128 で探索しておく。
@@ -270,13 +274,13 @@ void MainThread::search()
 	// MultiPV
 	// ※　dlshogiでは現状未サポートだが、欲しいので追加しておく。
 	// これは、isreadyのあと、goの直前まで変更可能
-	searcher.search_options.multi_pv = Options["MultiPV"];
+	searcher.search_options.multi_pv = (ChildNumType)Options["MultiPV"];
 
 	Move ponderMove;
 	Move move = searcher.UctSearchGenmove(&rootPos, rootPos.sfen(), {}, ponderMove);
 
 	// ponder中であれば、呼び出し元で待機しなければならない。
-
+	
 	// 最大depth深さに到達したときに、ここまで実行が到達するが、
 	// まだThreads.stopが生じていない。しかし、ponder中や、go infiniteによる探索の場合、
 	// USI(UCI)プロトコルでは、"stop"や"ponderhit"コマンドをGUIから送られてくるまでbest moveを出力してはならない。

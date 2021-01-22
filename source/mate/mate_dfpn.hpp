@@ -89,7 +89,11 @@ namespace Mate::Dfpn64
 		// 子ノードを展開しようとしたが、子ノードが存在しなかった場合は、0になる。
 		u8 child_num;
 
-		u8 padding[3]; // これを含めてこの構造体が32 bytesになるようにしておく。
+		// 千日手など循環が、このノードを含めたsub-nodeで生じたか。
+		// (この場合、pn,dnは経路依存と言うことになる。)
+		bool repeated;
+
+		u8 padding[2]; // これを含めてこの構造体が32 bytesになるようにしておく。
 
 		// このnodeを初期化する。
 		template <bool or_node>
@@ -140,6 +144,13 @@ namespace Mate::Dfpn64
 		{
 			this->pn = or_node ? NodeCountType(DNPN_INF - ply): 0;
 			this->dn = or_node ? 0                             :NodeCountType(DNPN_INF - ply);
+		}
+
+		// 詰まない時のpnとdnの値を設定する。
+		void set_nomate(int ply = 0)
+		{
+			this->pn = NodeCountType(DNPN_INF - ply);
+			this->dn = 0; // 不詰が証明されている。
 		}
 
 		// この構造体のchild_num(子ノードの数)とnode(これは子ノードへのポインタ相当),を設定してやる。
@@ -197,12 +208,15 @@ namespace Mate::Dfpn32
 		NodeCountType pn, dn;
 
 		// このノードに至るための直前の指し手
-		// Moveの上位8bitは0であることが保証されているので、24bitだけ使う。残り1byteは、child_numの格納のために用いる。
-		u32 lastMove  : 24; 
+		// Moveは21bitであることが保証されているので、23bitだけ使う。残り1byteは、child_numの格納のために用いる。
+		u32 lastMove  : 23;
+
+		// 千日手など循環が、このノードを含めたsub-nodeで生じたか。
+		// (この場合、pn,dnは経路依存と言うことになる。)
+		u32 repeated  : 1;
 
 		// このノードの子の数が格納されている。
 		// 詰将棋においてたかだか100いくつしかないので1byteで十分。
-		// 16bitでも十分なのだが…。
 		// 子ノードの数。
 		// 子ノードが未展開のときはこの変数の値はCHILDNUM_NOT_INITになる。
 		// 子ノードを展開しようとしたが、子ノードが存在しなかった場合は、0になる。
@@ -235,10 +249,10 @@ namespace Mate::Dfpn32
 		// このnodeを初期化する
 		// この指し手で詰む時の、このnodeの初期化
 		template <bool or_node>
-		void init_mate_move(Move move)
+		void init_mate_move(Move move ,int ply = 0)
 		{
 			this->lastMove = move;
-			this->template set_mate<true>();
+			this->template set_mate<true>(ply);
 
 			// これはnullptrを意味する。
 			children = NodeCountTypeNull;
@@ -262,6 +276,13 @@ namespace Mate::Dfpn32
 		{
 			this->pn = or_node ? NodeCountType(DNPN_INF - ply): 0;
 			this->dn = or_node ? 0                             :NodeCountType(DNPN_INF - ply);
+		}
+
+		// 詰まない時のpnとdnの値を設定する。
+		void set_nomate(int ply = 0)
+		{
+			this->pn = NodeCountType(DNPN_INF - ply);
+			this->dn = 0; // 不詰が証明されている。
 		}
 
 		// この構造体のchild_num(子ノードの数)とnode(これは子ノードへのポインタ相当),を設定してやる。
@@ -398,7 +419,7 @@ namespace Mate::Dfpn32
 
 	// df-pn詰将棋ルーチン本体
 	// 事前にメモリ確保やら何やらしないといけないのでクラス化してある。
-	template <typename NodeCountType , bool MoveOrdering>
+	template <typename NodeCountType , bool MoveOrdering , bool WithHash >
 	class MateDfpnPn : public Mate::Dfpn::MateDfpnSolverInterface
 	{
 	public:
@@ -426,10 +447,27 @@ namespace Mate::Dfpn32
 			node_manager.alloc(nodes_limit);
 		}
 
+		// Hash Tableの設定。
+		// 全スレッドで共用しているようなhash table
+		// ※　詰み/不詰を証明済みの局面についてcacheしておくためのテーブル
+		//    Node32bitWithHashのような"WithHash"とついているインスタンスに対して有効。
+		virtual void set_hash_table(MateHashTable* hash_table)
+		{
+			this->hash_table = hash_table;
+		}
+
 		// alloc()で確保していたメモリを開放する。
 		void release()
 		{
 			node_manager.release();
+		}
+
+		// 最大探索深さ。これを超えた局面は不詰扱いとする。
+		// Position::game_ply()がこれを超えた時点で不詰扱い。
+		// 0を指定すると制限なし。デフォルトは0。
+		virtual void set_max_game_ply(int max_game_ply)
+		{
+			this->max_game_ply = max_game_ply;
 		}
 
 		// 詰み探索をしてnodes_limit内のノード数で解ければその初手が返る。
@@ -666,6 +704,11 @@ namespace Mate::Dfpn32
 				 && !Threads.stop // スレッド停止命令が来たら即座に終了する。
 				)
 			{
+#if 0
+				 // デバッグ用に局面を出力してやる。
+				 std::cout << pos << std::endl;
+#endif
+
 				u8 child_num = node->child_num;
 				if (child_num == NodeType::CHILDNUM_NOT_INIT)
 				{
@@ -692,7 +735,27 @@ namespace Mate::Dfpn32
 
 				pos.undo_move(m);
 
-			}
+				// 千日手が絡まずに詰み or 不詰を証明したので、置換表に保存する。
+				if (WithHash && (node->dn == 0 || node->pn == 0) && !node->repeated)
+				{
+					auto key = pos.state()->board_key();
+					auto entry = hash_table->first_entry(key);
+
+					// たぶん指し手mでこれを証明したはずなので、これを登録しておく。
+					bool is_mate = node->pn == 0; /* pn == 0はわかったから、その手数(== DNPN_INF - dn)を保存したい */
+					auto ply = is_mate ? (u32)(NodeType::DNPN_INF - node->dn) : (u32)(NodeType::DNPN_INF - node->pn);
+					entry->save(key, root_color , pos.state()->hand , is_mate , ply, m);
+
+#if 0
+					// デバッグ用に証明済みの局面を出力してみる。
+					std::cout << pos << std::endl
+							  << " is_mate = " << is_mate << std::endl
+							  << " ply     = " << ply << std::endl
+							  << " move    = " << m << std::endl;
+#endif
+				}
+
+			 }
 		}
 
 		// あるnodeの子ノードのなかから、一番良さげなNodeを選択する。
@@ -792,7 +855,7 @@ namespace Mate::Dfpn32
 				{
 					// 通常のdf-pnは、or nodeの
 					// ・pnは、子ノードのpnの最小値
-					// ・dnは子ノードのdnの和
+					// ・dnは、子ノードのdnの和
 					// だが、ここでは詰み局面までの手数に応じた∞について取り扱うためにこれを拡張する。
 
 					pn = std::min(pn, p);
@@ -819,6 +882,56 @@ namespace Mate::Dfpn32
 			}
 			node->pn = pn;
 			node->dn = dn;
+
+			if (WithHash)
+			{
+				// 詰み or 不詰を証明しているので、repeatedな情報を用いたのかが問題となる。
+				if (node->pn == 0 || node->dn == 0)
+				{
+					// or_nodeについて)
+					//   pn == 0 なら、pn == 0の子ノードからrepeatedが伝播する。
+					//   dn == 0 なら、全子ノードのrepeated の OR が伝播する。
+
+					// and_nodeについて)
+					//   dn == 0 なら、dn == 0の子ノードからrepeatedが伝播する。
+					//   pn == 0 なら、全子ノードのrepeated の OR が伝播する。
+
+
+					if (or_node)
+						if (node->pn == 0) {
+							for (u32 i = 0; i < child_num; ++i)
+								if (children[i].pn == 0) {
+									node->repeated = children[i].repeated;
+									break;
+								}
+						}
+						else {
+							bool repeated = false;
+							for (u32 i = 0; i < child_num; ++i)
+								repeated |= children[i].repeated;
+							node->repeated = repeated;
+						}
+					else // !or_node
+						if (node->dn == 0) {
+							for (u32 i = 0; i < child_num; ++i)
+								if (children[i].dn == 0) {
+									node->repeated = children[i].repeated;
+									break;
+								}
+						}
+						else {
+							bool repeated = false;
+							for (u32 i = 0; i < child_num; ++i)
+								repeated |= children[i].repeated;
+							node->repeated = repeated;
+						}
+				}
+				else {
+					// dn,pnが0ではないなら、repeatedであるかは問題とならないので何も伝播しない。
+					//node->repeated = false;
+				}
+			}
+
 		}
 
 		// root nodeを展開する。
@@ -836,8 +949,9 @@ namespace Mate::Dfpn32
 			current_root->child_num = NodeType::CHILDNUM_NOT_INIT;
 			ExpandNode<or_node>(pos, current_root);
 
-			root_game_ply = pos.game_ply();
-			root_pos = &pos;
+			root_game_ply =  pos.game_ply();
+			root_color    =  pos.side_to_move();
+			root_pos      = &pos;
 		}
 
 		// Nodeを展開する(子ノードをぶら下げる)
@@ -858,6 +972,130 @@ namespace Mate::Dfpn32
 		{
 			ASSERT_LV3(node != nullptr && node->child_num == NodeType::CHILDNUM_NOT_INIT);
 
+			if (WithHash)
+			{
+				// 置換表に登録されていれば、その結論を用いる。
+
+				auto key = pos.state()->board_key();
+				auto entry = hash_table->first_entry(key);
+
+				// 置換表の値で証明されたか？
+				bool proven = false;
+
+				entry->lock();
+				if (   entry->board_key  == (key & 0xffffffffffff) /* 48bit/4 = fが12個 */
+					&& entry->root_color == root_color
+					)
+				{
+#if 0
+					// デバッグのために出力してみる。
+					std::cout << pos << std::endl
+						      << entry->get_move() << std::endl
+							  << entry->get_hand() << std::endl;
+#endif
+
+					// board_keyは一致した。
+					if (entry->is_mate) // pn == 0 , 詰み
+					{
+						//  or_node : 手番側(攻め方)の手駒が登録局面より優越している(or同じ)なら、この結論が使えるはず。
+						// !or_node : 手番側(受け方)の手駒が登録局面より劣等している(or同じ)なら、この結論が使えるはず。
+						//  詰みが証明されている局面の情報があるとして、
+						// 　攻め方は、それより手駒が同じか多ければ同様に詰む。
+						//   受け方は、それより手駒が同じか少なければ同様に詰む(詰まされる)。
+						if (   ( or_node && hand_is_equal_or_superior(pos.state()->hand , entry->get_hand()))
+							|| (!or_node && hand_is_equal_or_superior(entry->get_hand() , pos.state()->hand))
+							)
+						{
+							node->template set_mate<true /* or nodeから見て詰む */>(entry->ply);
+							proven = true;
+
+#if 0
+							// 登録されている内容が正しいか検証。
+							if (or_node)
+							{
+								Mate::Dfpn::MateDfpnSolver dfpn(Mate::Dfpn::DfpnSolverType::Node64bit);
+								dfpn.alloc(1024);
+								Move move = dfpn.mate_dfpn(pos, 1000000);
+								if (move == MOVE_NONE || move == MOVE_NULL)
+								{
+									// 詰むはずなのだが？
+									std::cout << pos << std::endl;
+								}
+							}
+#endif
+						}
+					}
+					else { // dn == 0 , 不詰
+						//  or_node : 手番側(攻め方)の手駒が登録局面より劣等している(or同じ)なら、この結論が使えるはず。
+						// !or_node : 手番側(受け方)の手駒が登録局面より優越している(or同じ)なら、この結論が使えるはず。
+						//  不詰が証明されている局面の情報があるとして、
+						// 　攻め方は、それより手駒が同じか少なければ同様に詰まない。
+						//   受け方は、それより手駒が同じか多ければ同様に詰まない
+						if (   ( or_node && hand_is_equal_or_superior(entry->get_hand() , pos.state()->hand))
+							|| (!or_node && hand_is_equal_or_superior(pos.state()->hand , entry->get_hand()))
+							)
+						{
+							node->set_nomate(entry->ply);
+							proven = true;
+
+#if 0
+							// 登録されている内容が正しいか検証。
+							Mate::Dfpn::MateDfpnSolver dfpn(Mate::Dfpn::DfpnSolverType::Node64bit);
+							dfpn.alloc(1024);
+							if (dfpn.mate_dfpn(pos, 1000000) != MOVE_NULL)
+							{
+								// 詰まないはずなのだが？
+								std::cout << pos << std::endl;
+							}
+#endif
+						}
+					}
+				}
+				// unlock()する前に取り出しておく。
+				Move move = entry->get_move();
+
+				// 置換表へのアクセスはこれ以上行わないので早い段階でunlockしておく。
+				entry->unlock();
+
+				if (proven)
+				{
+					// root nodeであれば子ノード一つ作って、この指し手を保存しておきたい。
+					// ※　あとで初手がわからなくなるので…。
+					if (node == current_root)
+					{
+						NodeType* child = new_node(1);
+						child->template init_mate_move<or_node>(move);
+						node->set_child(1,node_manager.node_to_node_index(child));
+					}
+					else {
+						// root node以外なら子なし扱いでもいいのでは…。
+						// 厳密な読み筋がいま欲しいわけではあるまい。
+						node->set_child(0);
+					}
+
+					// 置換表には循環を含む結論は書き出されていないので、そこから得た情報ならrepeatedはfalse。
+					node->repeated = false;
+					return;
+				}
+
+			}
+
+			// orノード  : 手数がmax_game_plyを超えているなら不詰扱い。
+			// 　　　　　  max_game_plyが0の時は無制限なのでこの判定はしない。
+			// andノード : 手数がmax_game_plyを超えているなら不詰扱い。ただし、現局面で詰んでいる or 禁則手しか残っていないなら
+			// 　　　　　　この限りではない。
+			// なのでandノードでは、このチェックは、指し手生成しないと正確な判定ができない。
+			// よって、このあとでチェックを行う。
+			if (or_node && max_game_ply && max_game_ply < pos.game_ply())
+			{
+				// ここで次の一手は指せない。(例:256手ルールにおける257手目の局面)
+				node->set_child(0);
+				node->set_nomate();
+				if (WithHash)
+					node->repeated = true;
+				return;
+			}
+
 			int plies_from_root = pos.game_ply() - root_game_ply;
 			auto rep = mate_repetition(pos, plies_from_root, MAX_REPETITION_PLY, or_node);
 
@@ -869,11 +1107,15 @@ namespace Mate::Dfpn32
 			case MateRepetitionState::Mate:
 				node->set_child(0);
 				node->template set_mate<or_node>();
+				if (WithHash)
+					node->repeated = true;
 				return;
 
 			case MateRepetitionState::Mated:
 				node->set_child(0);
 				node->template set_mated<or_node>();
+				if (WithHash)
+					node->repeated = true;
 				return;
 
 			case MateRepetitionState::Unknown:
@@ -894,6 +1136,9 @@ namespace Mate::Dfpn32
 
 					node->set_child(1,node_manager.node_to_node_index(child));
 					node->template set_mate<or_node>(1 /* 次の局面で詰むので */);
+
+					if (WithHash)
+						node->repeated = false;
 					
 					return;
 				}
@@ -903,6 +1148,22 @@ namespace Mate::Dfpn32
 			// 歩の不成も含めて生成しておく。(詰め将棋ルーチンでそれが詰ませられないと悔しいので)
 			auto mp = MovePicker<or_node, INCHECK, true , MoveOrdering>(pos);
 			u32 child_num = (u32)mp.size();
+
+			if (!or_node && max_game_ply && max_game_ply < pos.game_ply() && child_num)
+			{
+				// ここで次の一手は指せないが、指し手はあるので詰んでいないことは言える。
+				// (例:256手ルールにおける257手目の局面)
+				// なのでand nodeでは、これで逃れている。= 不詰。
+				// 仮にこの指し手で連続王手の千日手(禁則)になるとしても、
+				// ここで詰んでいないので手番が来た時点で引き分けが成立するから不詰。
+				node->set_child(0);
+				node->set_nomate();
+				if (WithHash)
+					node->repeated = true;
+				return;
+			}
+
+
 			node->child_num = child_num;
 
 			if (child_num == 0)
@@ -918,6 +1179,8 @@ namespace Mate::Dfpn32
 				if (children == nullptr)
 				{
 					node->pn = node->dn = 1; // とりま何らか設定だけしておく。
+					if (WithHash)
+						node->repeated = true;
 					return;
 				}
 
@@ -946,6 +1209,7 @@ namespace Mate::Dfpn32
 		NodeType* current_root;
 		Position* root_pos;
 		int root_game_ply; // 探索開始局面のgame_ply。これは、千日手検出の時に必要となる。
+		Color root_color;  // 探索開始局面の手番
 
 		// 探索の時に指定されたノード制限
 		NodeCountType nodes_limit;
@@ -958,6 +1222,14 @@ namespace Mate::Dfpn32
 
 		// current_rootの局面での詰みの指し手
 		Move bestmove;
+
+		// この手数に達したら、引き分け扱い(不詰)とする。
+		// set_max_game_ply()で設定された値。
+		// 0は制限なし。
+		int max_game_ply;
+
+		// 詰み/不詰を証明済みの局面をcacheしておくtable
+		MateHashTable* hash_table;
 
 	private:
 		// Node,Childのcustom allocatorみたいなもん。

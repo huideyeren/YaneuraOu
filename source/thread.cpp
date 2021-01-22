@@ -39,8 +39,8 @@ void Thread::clear()
 		for (StatsType c : { NoCaptures, Captures })
 		{
 			for (auto& to : continuationHistory[inCheck][c])
-		for (auto& h : to)
-			h->fill(0);
+				for (auto& h : to)
+					h->fill(0);
 			continuationHistory[inCheck][c][SQ_ZERO][NO_PIECE]->fill(Search::CounterMovePruneThreshold - 1);
 		}
 #endif
@@ -218,11 +218,11 @@ void ThreadPool::start_thinking(const Position& pos, StateListPtr& states ,
 	// be deduced from a fen string, so set() clears them and they are set from
 	// setupStates->back() later. The rootState is per thread, earlier states are shared
 	// since they are read-only.
-
+	  
 	// Position::set()によってst->previosがクリアされるので事前にコピーして保存する。
 	// これは、rootStateの役割。これはスレッドごとに持っている。
 	// cf. Fix incorrect StateInfo : https://github.com/official-stockfish/Stockfish/commit/232c50fed0b80a0f39322a925575f760648ae0a5
-
+	
 	auto sfen = pos.sfen();
 	for (Thread* th : *this)
 	{
@@ -297,4 +297,16 @@ void ThreadPool::wait_for_search_finished() const {
 	for (Thread* th : *this)
 		if (th != front())
 			th->wait_for_search_finished();
+}
+
+// main thread以外の探索スレッドがすべて終了しているか。
+// すべて終了していればtrueが返る。
+bool ThreadPool::search_finished() const
+{
+	for (Thread* th : *this)
+		if (th != front())
+			if (th->is_searching())
+				return false;
+
+	return true;
 }

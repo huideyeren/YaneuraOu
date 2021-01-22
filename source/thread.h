@@ -71,6 +71,11 @@ public:
 	// 探索が終わるのを待機する。(searchingフラグがfalseになるのを待つ)
 	void wait_for_search_finished();
 
+	// === やねうら王独自拡張 ===
+
+	// 探索中であるかを返す。
+	bool is_searching() const { return searching; }
+
 	// ------------------------------
 	//       探索に必要なもの
 	// ------------------------------
@@ -158,7 +163,7 @@ struct MainThread: public Thread
 
 	// 探索を開始する時に呼び出される。
 	void search() override;
-	
+
 	// Thread::search()を呼び出す。
 	// ※　Stockfish、MainThreadがsearch()をoverrideする設計になっているの、良くないと思う。
 	//     そのため、MainThreadに対して外部からThread::search()を呼び出させることが出来ない。
@@ -238,10 +243,16 @@ struct ThreadPool: public std::vector<Thread*>
 	// main threadがそれ以外の探索threadの終了を待つ。
 	void wait_for_search_finished() const;
 
-	// stop   : 探索中にこれがtrueになったら探索を即座に終了すること。
+	// stop          : 探索中にこれがtrueになったら探索を即座に終了すること。
 	// increaseDepth : 一定間隔ごとに反復深化の探索depthが増えて行っているかをチェックするためのフラグ
 	//                 増えて行ってないなら、同じ深さを再度探索するのに用いる。
 	std::atomic_bool stop , increaseDepth;
+
+	// === やねうら王独自拡張 ===
+
+	// main thread以外の探索スレッドがすべて終了しているか。
+	// すべて終了していればtrueが返る。
+	bool search_finished() const;
 	
 private:
 
